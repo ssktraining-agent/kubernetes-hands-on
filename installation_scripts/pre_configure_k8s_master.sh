@@ -1,18 +1,43 @@
-#/bin/bash 
-# this script will install required packages and do required system configurations 
+#!/usr/bin/env bash
+# Prepare a control-plane node for kubeadm.
+#
+# Target: Kubernetes v1.37 on Ubuntu 22.04 / 24.04.
+#
+# What changed from the previous version of this script, and why:
+#
+#   apt.kubernetes.io and packages.cloud.google.com were frozen in September
+#   2023 and switched off in March 2024. Any script still pointing at them
+#   fails at `apt update`. The replacement is pkgs.k8s.io, and the repository
+#   URL now contains the minor version, so upgrading between minors means
+#   editing the sources file rather than just running apt upgrade.
+#
+#   apt-key and /etc/apt/trusted.gpg.d are deprecated. Keys belong in
+#   /etc/apt/keyrings and are bound to one repository with signed-by.
+#
+set -euo pipefail
 
-# adding host entries for k8s 
-sudo hostnamectl set-hostname "k8smaster.ssktraining.com"
-export master_hostname=`hostname -I`
-export add_master_entry="$master_hostname k8smaster.ssktraining.com"
-cat  hostname.txt | sudo tee -a /etc/hosts
-#sudo -- sh -c -e "echo '$master_hostname k8smaster.ssktraining.com' >> /etc/hosts";
+KUBE_VERSION="${KUBE_VERSION:-v1.37}"
+NODE_NAME="${NODE_NAME:-k8smaster.ssktraining.com}"
 
-# disable swap 
-sudo swapoff -a 
-sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+echo "==> preparing control plane for Kubernetes ${KUBE_VERSION}"
 
-sudo tee /etc/modules-load.d/containerd.conf <<EOF
+# --- hostname and /etc/hosts -----------------------------------------------
+sudo hostnamectl set-hostname "${NODE_NAME}"
+if [ -f hostname.txt ]; then
+  sudo tee -a /etc/hosts < hostname.txt >/dev/null
+else
+  echo "    hostname.txt not found; add master and worker entries to /etc/hosts yourself"
+fi
+
+# --- swap ------------------------------------------------------------------
+# kubelet still refuses to start with swap on unless you opt in. Swap support
+# reached beta in v1.28 (NodeSwap) but the default is still fail-on-swap, so
+# this stays.
+sudo swapoff -a
+sudo sed -i '/\sswap\s/ s/^\(.*\)$/#\1/g' /etc/fstab
+
+# --- kernel modules and sysctl ---------------------------------------------
+sudo tee /etc/modules-load.d/k8s.conf >/dev/null <<'EOF'
 overlay
 br_netfilter
 EOF
@@ -20,49 +45,63 @@ EOF
 sudo modprobe overlay
 sudo modprobe br_netfilter
 
-sudo tee /etc/sysctl.d/kubernetes.conf <<EOF
+sudo tee /etc/sysctl.d/k8s.conf >/dev/null <<'EOF'
+net.bridge.bridge-nf-call-iptables  = 1
 net.bridge.bridge-nf-call-ip6tables = 1
-net.bridge.bridge-nf-call-iptables = 1
-net.ipv4.ip_forward = 1
+net.ipv4.ip_forward                 = 1
 EOF
 
-sudo sysctl --system
+sudo sysctl --system >/dev/null
 
+# --- container runtime (containerd) ----------------------------------------
+sudo apt-get update
+sudo apt-get install -y curl gnupg ca-certificates apt-transport-https
 
-# install containerd runtime
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
 
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
 
-sudo apt install -y curl gnupg2 software-properties-common apt-transport-https ca-certificates
-sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmour -o /etc/apt/trusted.gpg.d/docker.gpg
-sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+sudo apt-get update
+sudo apt-get install -y containerd.io
 
-
-sudo apt update
-sudo apt install -y containerd.io
-
-containerd config default | sudo tee /etc/containerd/config.toml >/dev/null 2>&1
-sudo sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/config.toml
-
+# Use the systemd cgroup driver. On cgroup v2 (the default on Ubuntu 22.04+)
+# kubelet and the runtime must agree, or pods start and then die with cgroup
+# errors that read like something else entirely.
+#
+# The config layout differs between containerd 1.x and 2.x, but the key name
+# does not, so this substitution works on both.
+sudo mkdir -p /etc/containerd
+containerd config default | sudo tee /etc/containerd/config.toml >/dev/null
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
 
 sudo systemctl restart containerd
 sudo systemctl enable containerd
 
-# Add kubernetes repository
+# --- kubeadm, kubelet, kubectl ---------------------------------------------
+sudo curl -fsSL "https://pkgs.k8s.io/core:/stable:/${KUBE_VERSION}/deb/Release.key" \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
-curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo gpg --dearmour -o /etc/apt/trusted.gpg.d/kubernetes-xenial.gpg
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${KUBE_VERSION}/deb/ /" \
+  | sudo tee /etc/apt/sources.list.d/kubernetes.list >/dev/null
 
-sudo apt-add-repository "deb http://apt.kubernetes.io/ kubernetes-xenial main"
-
-# install Kubectl , Kubeadm and kubelet 
-
-sudo apt update
-sudo apt install -y kubelet kubeadm kubectl
+sudo apt-get update
+sudo apt-get install -y kubelet kubeadm kubectl
 sudo apt-mark hold kubelet kubeadm kubectl
 
+sudo systemctl enable --now kubelet
 
-# Initiate kubernetes Cluster, Create Master 
-#sudo kubeadm init --control-plane-endpoint=k8smaster.ssktraining.com
-
-
-
-
+echo
+echo "==> done. versions installed:"
+kubeadm version -o short
+kubectl version --client -o yaml | grep gitVersion | head -1
+echo
+echo "Next, initialise the cluster. --pod-network-cidr must match your CNI:"
+echo "  sudo kubeadm init \\"
+echo "    --control-plane-endpoint=${NODE_NAME} \\"
+echo "    --pod-network-cidr=192.168.0.0/16"
+echo
+echo "Copy the 'kubeadm join ...' line from the output — the worker needs it."

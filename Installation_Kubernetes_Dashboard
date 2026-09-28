@@ -1,29 +1,57 @@
-Steps to create and view kubernetes dashboard
+# Kubernetes Dashboard
 
-1. Deploy kubernetes dashboard using following command 
-  $ kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
+## What changed
 
-2. Create Service account and ClusterRoleBinding
-  - we need service account to access our kubernetes dashboard. we need attach ClusterRole " Cluster-admin " to our service 
-account which is called ClusterRoleBinding. Let see how we can do that. 
+As of Dashboard **v7.0.0** the manifest install is gone. This no longer works:
 
-   $ kubectl  apply -f service_account.yaml 
-   $ kubectl apply -f ClusterRole_Bind_to_Service_Account.yaml
+```
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
+```
 
-3.  Create Token to access kubernetes dashboard 
-    $  kubectl -n kubernetes-dashboard create token admin-user  # save generated token safely
+Dashboard is now a multi-container application with a Kong gateway in front
+of it, and the project supports Helm only. The old `recommended.yaml` that
+used to sit in this repo has been removed for the same reason — it installed
+v2.7.0, which is years out of support.
 
-4. Start Kubernetes Dashboard 
-    $ kubectl proxy &
+## Install
 
-5. Expose kubernetes dashboard using NodePort
-    $  kubectl --namespace kubernetes-dashboard patch svc kubernetes-dashboard -p '{"spec": {"type": "NodePort"}}'
-    $  kubectl get service -n kubernetes-dashboard  # note the nodeport from output 
+```
+helm repo add kubernetes-dashboard https://kubernetes.github.io/dashboard/
 
-6. Get node port and acess dashbaord using any worker node ip & nodeport 
-     e.g. https://3.13.45.34:31564   (  ip is of worker node  and nodeport which you got it )
+helm upgrade --install kubernetes-dashboard \
+  kubernetes-dashboard/kubernetes-dashboard \
+  --create-namespace --namespace kubernetes-dashboard
+```
 
-7. Once you open url, it will asked for token. Copy & paste the token you got from step3. Once you are authenticated, you 
-  will be able to see the dashboard.
+## Create a user to log in with
 
-    
+Dashboard has no users of its own. You authenticate with a ServiceAccount
+token.
+
+```
+kubectl apply -f service_account.yaml
+kubectl apply -f ClusterRole_Bind_to_Service_Account.yaml
+
+kubectl -n kubernetes-dashboard create token admin-user
+```
+
+Copy the token. It is valid for one hour by default; add `--duration=8h` if
+you are running a full-day class.
+
+> The binding in `ClusterRole_Bind_to_Service_Account.yaml` grants
+> **cluster-admin**. That is fine for a lab cluster and wrong everywhere
+> else — it is full control of the cluster, handed to anyone who gets the
+> token. For a real cluster, bind the `view` ClusterRole instead and create
+> separate, narrower roles for the people who need to change things.
+
+## Access it
+
+```
+kubectl -n kubernetes-dashboard port-forward svc/kubernetes-dashboard-kong-proxy 8443:443
+```
+
+Then open <https://localhost:8443> and paste the token.
+
+Use `port-forward` rather than patching the Service to NodePort. A NodePort
+exposes the dashboard on every node in the cluster, to anyone who can reach
+them, and it tends to outlive the class it was created for.

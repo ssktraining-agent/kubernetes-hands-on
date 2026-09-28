@@ -1,0 +1,111 @@
+# NetworkPolicy — and the check almost nobody runs
+#
+# Kubernetes does not enforce NetworkPolicy. Your CNI plugin does. The API
+# server will happily accept, store and display a policy that nothing is
+# enforcing.
+#
+# kind's default CNI (kindnet) is exactly this case. So is Flannel. On either
+# of them, everything below applies cleanly, appears in `kubectl get netpol`,
+# reads correctly in a review, and blocks nothing at all.
+#
+# Before you trust a policy anywhere, prove it bites. There is a test at the
+# bottom of this file that takes thirty seconds.
+---
+# Default deny, both directions, for the whole namespace.
+#
+# An empty podSelector means "every pod here". Listing the policyTypes
+# without any rules means "no traffic matches", so nothing is allowed until
+# something below explicitly allows it.
+#
+# Deny-by-default is the only version of this that is worth anything. A
+# namespace with six allow-rules and no default deny is a namespace where
+# everything is permitted and six things are documented.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: demo-secure
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# DNS. The first thing everyone forgets, and the failure is confusing:
+# applications do not report "blocked", they report a five-second timeout
+# resolving a hostname, which reads like a slow database.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: demo-secure
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Let the gateway reach the web pods, and nothing else reach them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-ingress-from-gateway
+  namespace: demo-secure
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: web
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: infra
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+# Egress to the internet, but never to anything inside the cluster.
+#
+# The `except` blocks are the part that gets left out. Without them, a policy
+# that reads "allow egress to the internet" also allows egress to every pod
+# and every Service in the cluster — because they are IP addresses too, and
+# 0.0.0.0/0 includes them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-egress-external-only
+  namespace: demo-secure
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: web
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 192.168.0.0/16   # pod network — adjust to your cluster
+              - 10.96.0.0/12     # service network
+              - 169.254.169.254/32  # cloud metadata endpoint. Always exclude this.
+      ports:
+        - { protocol: TCP, port: 443 }
+
+# ---------------------------------------------------------------------------
+# Prove the policies are enforced
+#
+#   kubectl -n demo-secure run probe --rm -it --restart=Never \
+#     --image=busybox:1.37 -- wget -qO- --timeout=3 http://web
+#
+# With a CNI that enforces policy: the connection times out.
+# With kindnet or Flannel: you get the nginx welcome page, and every policy
+# in this file is decoration.
+#
+# A control you have not tested is a document.

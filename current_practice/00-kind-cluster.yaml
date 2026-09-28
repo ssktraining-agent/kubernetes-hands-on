@@ -1,0 +1,37 @@
+# A local 3-node cluster, so the examples in this folder can be run without
+# two VMs and a kubeadm install.
+#
+#   kind create cluster --config current_practice/00-kind-cluster.yaml
+#
+# Note `disableDefaultCNI: true`. kind's default CNI (kindnet) accepts
+# NetworkPolicy objects and does not enforce them. On a default kind cluster
+# 13-network-policy.yaml would apply cleanly, show up in `kubectl get netpol`,
+# and block nothing at all. Install Calico after the cluster is up:
+#
+#   kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.32.2/manifests/tigera-operator.yaml
+#   kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.32.2/manifests/custom-resources.yaml
+#
+# This is worth making a teaching point of: a control you have not tested is
+# a document.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: k8s-demo
+
+networking:
+  disableDefaultCNI: true
+  podSubnet: "192.168.0.0/16"
+
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 8080
+        protocol: TCP
+  - role: worker
+  - role: worker

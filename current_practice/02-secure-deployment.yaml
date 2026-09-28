@@ -1,0 +1,103 @@
+# The same nginx workload as 01, written so the restricted standard accepts it.
+#
+# Five things are required, and all five are commonly missed:
+#
+#   runAsNonRoot: true          the image must not run as UID 0
+#   allowPrivilegeEscalation: false
+#   capabilities.drop: [ALL]    not "drop the dangerous ones" — all of them
+#   seccompProfile: RuntimeDefault
+#   no hostPath, hostNetwork, hostPID, hostIPC, privileged
+#
+# The image matters as much as the securityContext. The official nginx image
+# starts as root to bind port 80 and write to /var/cache/nginx, so it cannot
+# satisfy runAsNonRoot however you configure the pod. nginx-unprivileged is
+# the same server built to run as UID 101 on port 8080.
+#
+# That is the lesson worth landing: "make it restricted" is often an image
+# problem, not a YAML problem, and that is why it lands on the platform team
+# three weeks into a migration.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: demo-secure
+  labels:
+    app.kubernetes.io/name: web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: web
+    spec:
+      # Pod-level. Applies to every container unless a container overrides it.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+
+      # Off by default, and almost never needed. A pod that can read the API
+      # gets whatever its ServiceAccount is bound to — which, if nobody has
+      # looked, is more than you think.
+      automountServiceAccountToken: false
+
+      containers:
+        - name: web
+          image: nginxinc/nginx-unprivileged:1.30-alpine
+          ports:
+            - name: http
+              containerPort: 8080
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          # readOnlyRootFilesystem means every path the process writes to
+          # needs a volume. Finding them is the work; there is no shortcut.
+          volumeMounts:
+            - name: cache
+              mountPath: /var/cache/nginx
+            - name: run
+              mountPath: /tmp
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              # No CPU limit on purpose — see 08-resource-governance.yaml.
+              memory: 128Mi
+
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 10
+
+      volumes:
+        - name: cache
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: demo-secure
+spec:
+  selector:
+    app.kubernetes.io/name: web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

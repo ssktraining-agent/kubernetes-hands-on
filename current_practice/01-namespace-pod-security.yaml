@@ -1,0 +1,49 @@
+# Pod Security Admission
+#
+# PodSecurityPolicy was deprecated in v1.21 and REMOVED in v1.25. If you still
+# have notes, slides or manifests referring to PSP, they describe a resource
+# that no longer exists. This is what replaced it.
+#
+# PSA is built into the API server. There is nothing to install. You label a
+# namespace, and every pod created in it is checked against one of three
+# standards: privileged, baseline, restricted.
+#
+# Three modes, and you can set all three at once:
+#   enforce  - reject the pod
+#   audit    - allow it, record a violation in the audit log
+#   warn     - allow it, print a warning to whoever ran kubectl
+#
+# The useful pattern for an existing cluster is enforce=baseline with
+# warn=restricted: nothing breaks today, and every team sees what would break
+# when you tighten it later.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-secure
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.37
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# This pod is REJECTED by the namespace above. Apply it and read the error —
+# the API server lists every rule the pod broke, which makes it the fastest
+# way to teach what "restricted" actually means.
+#
+#   kubectl apply -f 01-namespace-pod-security.yaml
+#
+# Expected:
+#   Error from server (Forbidden): pods "rejected-pod" is forbidden:
+#   violates PodSecurity "restricted:v1.37": allowPrivilegeEscalation != false,
+#   unrestricted capabilities, runAsNonRoot != true, seccompProfile ...
+#
+# 02-secure-deployment.yaml is the same workload, accepted.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rejected-pod
+  namespace: demo-secure
+spec:
+  containers:
+    - name: web
+      image: nginx:1.30

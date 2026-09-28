@@ -1,0 +1,82 @@
+# ValidatingAdmissionPolicy — admission control without a webhook
+#
+# GA in v1.30. This is the one that changes what a platform team can do in an
+# afternoon.
+#
+# Before it, enforcing a rule like "every image must come from our registry"
+# meant a validating webhook: a deployment you build, a TLS certificate you
+# rotate, a service that must stay up, and a failurePolicy decision where
+# `Fail` means your webhook going down takes the cluster's API with it, and
+# `Ignore` means your policy is optional whenever it is unhealthy. Teams
+# reached for OPA Gatekeeper or Kyverno mostly to avoid owning that.
+#
+# VAP runs CEL expressions inside the API server. No pod, no certificate, no
+# availability question.
+#
+# It validates. It does not mutate — MutatingAdmissionPolicy is the separate,
+# newer piece for that. So "add a default label" is still a webhook's job.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: require-approved-registry
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups:   ["apps", ""]
+        apiVersions: ["v1"]
+        operations:  ["CREATE", "UPDATE"]
+        resources:   ["deployments", "statefulsets", "daemonsets", "pods"]
+
+  variables:
+    - name: containers
+      expression: >-
+        has(object.spec.template)
+          ? object.spec.template.spec.containers
+          : object.spec.containers
+
+  validations:
+    - expression: >-
+        variables.containers.all(c,
+          c.image.startsWith('registry.ssktraining.com/') ||
+          c.image.startsWith('registry.k8s.io/'))
+      message: "images must come from registry.ssktraining.com or registry.k8s.io"
+      reason: Forbidden
+
+    - expression: "variables.containers.all(c, !c.image.endsWith(':latest'))"
+      message: "the :latest tag is not permitted — pin a version"
+      reason: Forbidden
+---
+# The policy is inert until it is bound. That separation is deliberate: you
+# can ship a policy and roll it out namespace by namespace, or run it in
+# Audit and Warn for a fortnight before you enforce anything.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: require-approved-registry-binding
+spec:
+  policyName: require-approved-registry
+
+  # Deny  — reject the request
+  # Warn  — allow it, warn the caller
+  # Audit — allow it, record it in the audit log
+  #
+  # Start with [Warn, Audit]. Move to [Deny] once the audit log is quiet.
+  validationActions: [Deny]
+
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        policy-enforced: "true"
+
+# Try it:
+#   kubectl label namespace demo-secure policy-enforced=true
+#   kubectl -n demo-secure create deployment bad --image=nginx:latest
+#
+#   error: deployments.apps "bad" is forbidden: ValidatingAdmissionPolicy
+#   'require-approved-registry' denied request: the :latest tag is not
+#   permitted — pin a version
+#
+# Two ways to test a policy without risking anything:
+#   - set validationActions to [Warn, Audit] and watch the audit log
+#   - use the `spec.auditAnnotations` field to tag matching requests

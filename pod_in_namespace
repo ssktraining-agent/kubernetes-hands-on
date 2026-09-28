@@ -1,25 +1,44 @@
-# Create POD in given namespace 
+# Create a Pod in a given namespace
 
-1. Create Namespace wiht following command
+1. Create the namespace:
+
+```
  $ kubectl create namespace demo
+```
 
-2. Create yaml file with following contents and name it as mypod.yaml
+2. Create a yaml file with the following contents and name it `mypod.yaml`:
+
 ```
 apiVersion: v1
 kind: Pod
 metadata:
   name: mypod
-  namespace: test
+  namespace: demo
   labels:
     name: mypod
 spec:
   containers:
   - name: mypod
-    image: nginx
+    image: nginx:1.30
 ```
 
-3. Create pod using the above yaml in "demo" namespace
+3. Apply it:
 
 ```
- $ kubectl apply -f mypod.yaml -n demo 
+ $ kubectl apply -f mypod.yaml
 ```
+
+## Two things worth pointing out
+
+**The namespace in the file wins.** If the manifest sets
+`metadata.namespace`, `kubectl apply -n other` does not move it — it fails
+with a mismatch error. The `-n` flag only applies to objects that do not name
+a namespace themselves.
+
+(An earlier version of this file had `namespace: test` in the manifest and
+told you to apply it with `-n demo`, which is exactly that error.)
+
+**Leave the namespace out of the file** when the manifest is meant to be
+reusable across environments. Then `-n` works, and so does Kustomize's
+`namespace:` field. Hard-coding it is right for a manifest that belongs to
+one specific namespace and nowhere else.

@@ -1,0 +1,111 @@
+# Storage: the access mode nobody knows about, and the field that stops you
+# losing data.
+---
+# ReadWriteOncePod — GA in v1.29
+#
+# There were three access modes, and the names lie about what they do:
+#
+#   ReadWriteOnce (RWO)      one NODE may mount it read-write.
+#                            Every pod on that node can mount it too.
+#   ReadOnlyMany  (ROX)      many nodes, read-only.
+#   ReadWriteMany (RWX)      many nodes, read-write.
+#
+# The trap is RWO. People read it as "one pod" and use it to guarantee a
+# single writer — for a database, a lock file, a ledger. It guarantees no such
+# thing: schedule two pods onto the same node and both mount it read-write.
+# A rolling update that briefly runs old and new on one node is enough.
+#
+# ReadWriteOncePod is the mode that means what people thought RWO meant.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ledger-data
+  namespace: demo-secure
+spec:
+  accessModes:
+    - ReadWriteOncePod
+  resources:
+    requests:
+      storage: 5Gi
+  # Leave storageClassName unset to use the cluster default. Naming one here
+  # makes the manifest non-portable, which matters for a training repo.
+---
+# StatefulSet with a reclaim policy on its volumes
+#
+# persistentVolumeClaimRetentionPolicy (GA in v1.32) answers a question that
+# had no good answer before: what happens to the data when the StatefulSet is
+# deleted or scaled down?
+#
+# The default is Retain for both, which means scaling from 5 to 3 and back to
+# 5 reuses the original PVCs — usually what you want. But deleting the
+# StatefulSet leaves orphaned PVCs behind forever, and on a cloud provider
+# those are disks you are still paying for. Teams find out at the invoice.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: db
+  namespace: demo-secure
+spec:
+  serviceName: db
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: db
+
+  persistentVolumeClaimRetentionPolicy:
+    # Delete the PVCs when the StatefulSet itself is deleted.
+    whenDeleted: Delete
+    # But keep them when scaling down, so scaling back up reuses the data.
+    whenScaled: Retain
+
+  # Pods come up 0,1,2 in order by default. Parallel starts them together,
+  # which is right for a cluster that elects its own leader and wrong for
+  # anything with a primary that must exist first.
+  podManagementPolicy: OrderedReady
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: db
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        # Only chown the volume when its ownership is actually wrong.
+        # On a large volume the default (Always) adds minutes to every start,
+        # and it is a classic "why is my database pod slow to come up".
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: db
+          image: busybox:1.37
+          command: ["sh", "-c", "while true; do date >> /data/heartbeat; sleep 10; done"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { memory: 128Mi }
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+
+# Worth demonstrating: expand a PVC in place. Most CSI drivers support it,
+# and most people still delete and recreate.
+#
+#   kubectl -n demo-secure patch pvc data-db-0 \
+#     -p '{"spec":{"resources":{"requests":{"storage":"2Gi"}}}}'
+#
+# It only works if the StorageClass has allowVolumeExpansion: true, and it
+# only grows. There is no shrink, in any driver, and there never will be.

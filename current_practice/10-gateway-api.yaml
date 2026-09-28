@@ -1,0 +1,109 @@
+# Gateway API — the successor to Ingress
+#
+# Ingress is not deprecated and will not be removed, but it has had no new
+# features for years and is effectively frozen. Everything being built now —
+# traffic splitting, header manipulation, per-route timeouts, mesh
+# integration — is going into Gateway API.
+#
+# The reason Ingress stalled is worth teaching, because it is an
+# organisational problem expressed as an API:
+#
+#   Ingress put everything in one object. The TLS certificate, the hostname,
+#   the paths and the backends all lived together, so the platform team who
+#   owned the certificate and the application team who owned the paths had to
+#   edit the same file. Everything Ingress could not express — rate limits,
+#   rewrites, timeouts — went into vendor annotations, which made every
+#   manifest specific to one controller.
+#
+# Gateway API splits it by who owns what:
+#
+#   GatewayClass  the controller implementation        — infra provider
+#   Gateway       listeners, ports, TLS certificates   — platform/cluster team
+#   HTTPRoute     hostnames, paths, backends, weights  — application team
+#
+# The Gateway declares which namespaces may attach routes to it. That is a
+# real permission boundary, not a naming convention.
+#
+# Gateway API is CRDs, not built in. Install them first (v1.6.1 is current):
+#   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.1/standard-install.yaml
+# Then install a controller that implements them — Envoy Gateway, Istio,
+# NGINX Gateway Fabric, Cilium, Traefik, or your cloud's.
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: shared-gateway
+  namespace: infra
+spec:
+  gatewayClassName: envoy-gateway      # whatever your controller registers
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        # Only namespaces carrying this label may attach routes here.
+        # Owned by the platform team; application teams cannot widen it.
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              gateway-access: "true"
+---
+# Owned by the application team, in their own namespace.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: web
+  namespace: demo-secure
+spec:
+  parentRefs:
+    - name: shared-gateway
+      namespace: infra
+      sectionName: http
+  hostnames:
+    - "demo.ssktraining.com"
+  rules:
+    # A canary split. In Ingress this needed controller-specific annotations
+    # and behaved differently on every controller.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: web
+          port: 80
+          weight: 90
+        - name: web-canary
+          port: 80
+          weight: 10
+
+    # Header manipulation as a first-class field, not an annotation.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            set:
+              - name: X-Forwarded-Prefix
+                value: /api
+      backendRefs:
+        - name: web
+          port: 80
+      timeouts:
+        request: 10s
+
+# Compare with the Ingress this replaces:
+#
+#   apiVersion: networking.k8s.io/v1
+#   kind: Ingress
+#   metadata:
+#     annotations:
+#       nginx.ingress.kubernetes.io/canary: "true"
+#       nginx.ingress.kubernetes.io/canary-weight: "10"
+#       nginx.ingress.kubernetes.io/proxy-read-timeout: "10"
+#
+# Three annotations, three behaviours, none of them portable. Swapping the
+# controller meant rewriting every Ingress in the cluster. That is the
+# argument for Gateway API in one slide.

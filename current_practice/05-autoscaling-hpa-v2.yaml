@@ -1,0 +1,78 @@
+# HorizontalPodAutoscaler — autoscaling/v2
+#
+# autoscaling/v2beta1 and v2beta2 were removed in v1.26. If you have older
+# material using either, it does not apply to any supported cluster.
+#
+# Two things v2 has that v1 did not, and both matter more than the version
+# number:
+#
+#   metrics:   a list. CPU, memory, and external or custom metrics together.
+#              The HPA computes a desired replica count for each and takes
+#              the largest. Scaling on queue depth instead of CPU is the
+#              single most useful thing here, and it needs no CPU metric.
+#
+#   behavior:  separate scale-up and scale-down policies. Without it, the
+#              default is aggressive up and a 5-minute stabilisation down —
+#              which is usually the wrong shape for a spiky workload and
+#              impossible to change.
+#
+# HPA needs metrics-server. It is not installed by default on kubeadm or kind:
+#   kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+# On kind, add --kubelet-insecure-tls to the metrics-server args or it never
+# becomes ready — which is the single most common "my HPA says <unknown>".
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api
+  namespace: demo-secure
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+
+  minReplicas: 3
+  maxReplicas: 20
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70          # % of the CPU *request*, not the limit
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+  behavior:
+    scaleUp:
+      # React fast to a spike: double, or add 4 pods, whichever is more.
+      stabilizationWindowSeconds: 0
+      selectPolicy: Max
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+    scaleDown:
+      # Come down slowly. A 10-minute window means a brief dip in load does
+      # not remove capacity you are about to need again.
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 60
+
+# Watch it work:
+#   kubectl -n demo-secure get hpa api -w
+#   kubectl -n demo-secure describe hpa api     # the events explain every decision
+#
+# Note the HPA target is a percentage of the container's CPU *request*. A pod
+# with no request has no denominator, so the HPA reports <unknown> and never
+# scales. That is the second most common HPA question.

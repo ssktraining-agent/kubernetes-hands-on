@@ -1,0 +1,92 @@
+# Requests, limits, quota and priority — and the CPU limit argument
+#
+# Requests are what the scheduler uses to place a pod. Limits are what the
+# kubelet enforces at runtime. They are different jobs, and conflating them
+# is behind most "why is my pod slow / why did it get OOMKilled" questions.
+#
+# A memory limit is enforced by killing the container. A CPU limit is enforced
+# by throttling it — the process is simply not scheduled for part of every
+# 100ms period. That asymmetry is why the guidance differs:
+#
+#   memory: always set requests AND limits, usually equal.
+#   cpu:    always set requests. Think twice about limits.
+#
+# A CPU limit on a latency-sensitive service throttles it during exactly the
+# bursts it exists to absorb, and the symptom is p99 latency with no
+# corresponding CPU graph — the average looks fine. Set CPU requests so the
+# scheduler packs correctly, and leave the limit off unless you are in a
+# multi-tenant cluster that needs the hard ceiling.
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-quota
+  namespace: demo-secure
+spec:
+  hard:
+    requests.cpu: "8"
+    requests.memory: 16Gi
+    limits.memory: 32Gi
+    pods: "50"
+    persistentvolumeclaims: "10"
+    count/deployments.apps: "20"
+    # Quota per priority class: guarantees a team cannot fill the cluster
+    # with high-priority pods.
+    # scopeSelector below restricts the whole quota instead.
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: team-defaults
+  namespace: demo-secure
+spec:
+  limits:
+    - type: Container
+      # Applied to containers that specify nothing. Without this, a pod with
+      # no requests lands in BestEffort, is first to be evicted under memory
+      # pressure, and is invisible to the HPA.
+      defaultRequest:
+        cpu: 50m
+        memory: 64Mi
+      default:
+        memory: 256Mi
+      # A ceiling on what anyone may ask for, so one manifest cannot reserve
+      # a whole node.
+      max:
+        cpu: "2"
+        memory: 4Gi
+      min:
+        cpu: 10m
+        memory: 16Mi
+---
+# PriorityClass — who gets evicted when a node runs out.
+#
+# Note preemptionPolicy. The default (PreemptLowerPriority) means a pending
+# high-priority pod will evict running lower-priority pods to make room. For
+# batch work that is usually wrong: you want it to jump the *queue*, not to
+# kill someone's running job. Never is the setting for that.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: business-critical
+value: 1000000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "Customer-facing services. May preempt lower-priority pods."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: batch-best-effort
+value: 100
+globalDefault: false
+preemptionPolicy: Never
+description: "Batch work. Waits for room; never evicts anything."
+
+# See what the quota is actually holding:
+#   kubectl -n demo-secure describe resourcequota team-quota
+#
+# A quota that sets requests.cpu makes requests MANDATORY in that namespace.
+# Any pod without them is rejected outright — which is a blunt but effective
+# way to make a team set them, and worth warning people about before you turn
+# it on in a shared cluster.

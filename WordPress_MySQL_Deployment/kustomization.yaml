@@ -1,7 +1,17 @@
+# apiVersion and kind are optional for kustomize itself, but without them the
+# file is not a Kubernetes object and every schema validator and editor
+# treats it as broken YAML of unknown type. Declare them.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
 secretGenerator:
-- name: mysql-pass
-  literals:
-  - password=pass
+  - name: mysql-pass
+    literals:
+      # Lab credential. A literal in a kustomization ends up in git in plain
+      # text — for anything real, use files: with a gitignored file, or an
+      # external secrets operator.
+      - password=pass
+
 resources:
   - mysql-deployment.yaml
   - wordpress-deployment.yaml

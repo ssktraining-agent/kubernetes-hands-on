@@ -1,0 +1,116 @@
+# Two objects that decide whether your "3 replicas" means anything.
+#
+# A Deployment with replicas: 3 guarantees three pods exist. It says nothing
+# about where they run, or what happens when a node is drained. Both gaps are
+# closed here.
+---
+# PodDisruptionBudget — policy/v1 (policy/v1beta1 was removed in v1.25).
+#
+# This constrains *voluntary* disruption only: `kubectl drain`, cluster
+# autoscaler scale-down, a node pool upgrade. It does not protect you from a
+# node catching fire. That distinction is worth stating in a class, because
+# people assume a PDB is a durability guarantee and it is not.
+#
+# Without one, a rolling node upgrade can drain every node holding your pods,
+# one after another, faster than the replacements become ready.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api
+  namespace: demo-secure
+spec:
+  # minAvailable OR maxUnavailable, never both.
+  #
+  # A percentage is usually the better choice: minAvailable: 2 on a
+  # Deployment that later scales to 20 is a budget nobody will ever revisit.
+  minAvailable: 60%
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+
+  # GA since v1.31. What to do with pods that are running but not Ready —
+  # IfHealthyBudget (default) refuses to evict them, which can wedge a drain
+  # forever when the pods are unhealthy for an unrelated reason.
+  # AlwaysAllow lets the drain proceed.
+  unhealthyPodEvictionPolicy: AlwaysAllow
+---
+# topologySpreadConstraints
+#
+# The replacement for the pod anti-affinity gymnastics people used to write.
+# Anti-affinity says "not on the same node as". Spread constraints say "keep
+# the counts within skew of each other across this topology key", which is
+# what you actually meant.
+#
+# This Deployment is the same as 04, with spread added, so you can apply it
+# over the top and diff the placement.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: demo-secure
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api
+    spec:
+      topologySpreadConstraints:
+        # Hard: never more than 1 pod difference between zones. If that
+        # cannot be satisfied, the pod stays Pending — which is the point.
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: api
+          # Beta, on by default since v1.27. Without this, a Deployment
+          # rolling out can count the old ReplicaSet's pods towards the skew
+          # and leave the spread lopsided.
+          matchLabelKeys:
+            - pod-template-hash
+
+        # Soft: prefer spreading across nodes, but schedule anyway if you
+        # cannot. Mixing one hard and one soft constraint is the usual shape.
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: api
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        seccompProfile: { type: RuntimeDefault }
+
+      containers:
+        - name: api
+          image: nginxinc/nginx-unprivileged:1.30-alpine
+          ports:
+            - { name: http, containerPort: 8080 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { memory: 128Mi }
+          volumeMounts:
+            - { name: cache, mountPath: /var/cache/nginx }
+            - { name: run, mountPath: /tmp }
+      volumes:
+        - name: cache
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+
+# On a single-node kind cluster the zone constraint cannot be satisfied and
+# pods stay Pending. That is not a bug in the manifest — run:
+#
+#   kubectl -n demo-secure describe pod <name>
+#
+# and read the scheduler's reason. Making a constraint fail on purpose
+# teaches it better than making it succeed.

@@ -1,18 +1,39 @@
+# ReadWriteOnce (RWO)
+#
+# RWO means one NODE may mount the volume read-write. It does NOT mean one
+# pod. Two pods scheduled onto the same node can both mount it read-write —
+# which is how a rolling update ends up with two writers on a volume someone
+# believed was exclusive.
+#
+# If you need a single-writer guarantee, use ReadWriteOncePod. See
+# ../current_practice/12-storage.yaml.
+#
+# (This file previously had two `spec:` keys in one document, so `kubectl
+# apply` rejected it. The PVC and the Pod are separate objects.)
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
 apiVersion: v1
 kind: Pod
 metadata:
   name: my-pod
 spec:
   containers:
-  - name: my-container
-    image: nginx:latest
-    volumeMounts:
-    - name: my-volume
-      mountPath: /var/log/nginx
+    - name: my-container
+      image: nginx:1.30
+      volumeMounts:
+        - name: my-volume
+          mountPath: /var/log/nginx
   volumes:
-  - name: my-volume
-    persistentVolumeClaim:
-      claimName: my-pvc
-spec:
-  accessModes:
-    - ReadWriteOnce
+    - name: my-volume
+      persistentVolumeClaim:
+        claimName: my-pvc

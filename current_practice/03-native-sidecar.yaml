@@ -1,0 +1,85 @@
+# Native sidecar containers
+#
+# Stable since v1.33, first available in v1.28. A sidecar is an entry in
+# initContainers with restartPolicy: Always.
+#
+# Before this existed, a sidecar was just another entry in containers, and
+# that had two bugs nobody could fix from YAML:
+#
+#   1. Startup order. The app container could start before the sidecar was
+#      ready — before the proxy was up, before the secret was fetched — and
+#      fail its first requests. Teams worked around it with sleeps.
+#
+#   2. Jobs never finished. A Job is complete when all its containers exit.
+#      A logging or proxy sidecar never exits, so the Job ran forever. The
+#      workaround was a shared volume and a shutdown file.
+#
+# A native sidecar starts before the app containers, is kept running for the
+# whole pod lifetime, and is ignored when deciding whether a Job is done.
+# Both workarounds can be deleted.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: import-with-sidecar
+  namespace: demo-secure
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+
+      initContainers:
+        # A true init container: runs to completion, then the next one starts.
+        - name: wait-for-config
+          image: busybox:1.37
+          command: ["sh", "-c", "echo 'checking config...'; sleep 2"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+
+        # A sidecar: the restartPolicy is what makes it one. It starts here,
+        # stays up for the life of the pod, and does not hold the Job open.
+        - name: log-shipper
+          image: busybox:1.37
+          restartPolicy: Always
+          command:
+            - sh
+            - -c
+            - "while true; do [ -f /shared/app.log ] && cat /shared/app.log; sleep 2; done"
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+
+      containers:
+        - name: importer
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - "for i in 1 2 3 4 5; do echo \"row $i imported\" >> /shared/app.log; sleep 1; done; echo done"
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+
+      volumes:
+        - name: shared
+          emptyDir: {}
+
+# Try it:
+#   kubectl apply -f 03-native-sidecar.yaml
+#   kubectl -n demo-secure get job import-with-sidecar -w
+#
+# The Job reaches Complete while log-shipper is still running. Move
+# log-shipper into `containers:` and it never completes — that comparison is
+# the whole demo.

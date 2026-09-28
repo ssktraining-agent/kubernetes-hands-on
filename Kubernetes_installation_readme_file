@@ -1,76 +1,134 @@
-# Install  2 node Kubernetes Cluster 
+# Install a 2-node Kubernetes cluster with kubeadm
 
-Pre-requisite for installation
+Target version: **Kubernetes v1.37** (released 26 Aug 2026, supported until 28 Oct 2027).
+Verified against the upstream kubeadm documentation for v1.37.
 
-Machine/server configuration for Kubernetes Cluster  
-OS : Ubuntu 22.04 LTS 
-CPU:  2 core or more 
-memory:  4 GB RAM or more 
-Disk :  30 GB  Or more 
-Network: Bridge
-passwordless Sudo access to user instllaing kubernetes cluster
+> If you only want to run the examples in this repo and do not need a
+> multi-node cluster, skip all of this and use `current_practice/00-kind-cluster.yaml`.
+> One command, no VMs, about three minutes.
 
-Follow Steps below to install Kubernetes Cluster 
+## Pre-requisites
 
-# Install Kubernetes Master 
+    OS       : Ubuntu 22.04 LTS or 24.04 LTS
+    CPU      : 2 cores or more (control plane needs 2)
+    Memory   : 2 GB or more per machine, 4 GB recommended
+    Disk     : 30 GB or more
+    Network  : bridged, full connectivity between the nodes
+    Access   : passwordless sudo for the installing user
 
- 
-1. Login to master node, clone this repo and run Script under "installation_scripts" folder of repository on worker node
-  
-     $ git clone https://github.com/cloud-dev-user/kubernetes_demo.git
-     $ cd kubernetes_demo/installation_scripts
+Every node needs a unique hostname, MAC address and product_uuid.
 
-2. Update file "hostname.txt" with ipv4 address of master and worker node.  you can refer sample file in this repository.
+## Install the control plane
 
-    $ ./pre_configure_k8s_master.sh    # press "enter" key wherever prompted
+1. Log in to the control-plane node, clone this repo:
 
-3. Initiate Kubernetes Cluster on master node 
+       git clone https://github.com/cloud-dev-user/kubernetes_demo.git
+       cd kubernetes_demo/installation_scripts
 
-   $ sudo kubeadm init --control-plane-endpoint=k8smaster.ssktraining.com
+2. Put the IPv4 addresses of both nodes into `hostname.txt` (a sample is in
+   this repo), then run:
 
-   Wait till complete command is executed and copy the output to notepad.
+       ./pre_configure_k8s_master.sh
 
-4. Run Following commands on master node 
+   To install a different minor version, set `KUBE_VERSION` first — the
+   package repository URL contains the minor version, so this is not
+   optional:
 
-    $ mkdir -p $HOME/.kube
-    $ sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
-    $ sudo chown $(id -u):$(id -g) $HOME/.kube/config
+       KUBE_VERSION=v1.36 ./pre_configure_k8s_master.sh
 
-5. Now, Login to Worker node, clone this repo and run Script under "installation_scripts" folder of repository on worker node
-  
-  $ git clone https://github.com/cloud-dev-user/kubernetes_demo.git
-  $ cd kubernetes_demo/installation_scripts
+3. Initialise the cluster. The pod CIDR must match what your CNI expects;
+   `192.168.0.0/16` is Calico's default:
 
-5a. Update file "hostname.txt" with ipv4 address of master and worker node. You can refer sample file in this repository.
+       sudo kubeadm init \
+         --control-plane-endpoint=k8smaster.ssktraining.com \
+         --pod-network-cidr=192.168.0.0/16
 
-  $ ./pre_configure_k8s_worker.sh    # press "enter" key wherever prompted
+   Wait for it to finish and copy the whole output somewhere safe.
 
-6.  Run the command on worker node to connect to master node
-   Note: below is sample command you will ge similar command in output of step 3, i.e. your " kubeadm init ...." command
+4. Set up kubectl for your user:
 
-   $ sudo kubeadm join k8smaster.ssktraining.com:6443 --token cw35sq.owyc84gqa1d1j43l \
-        --discovery-token-ca-cert-hash sha256:8ecfc49173714c5991cfaeeb3ed90f44222cc7ac237a07afc2afe9716192b433
+       mkdir -p $HOME/.kube
+       sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+       sudo chown $(id -u):$(id -g) $HOME/.kube/config
 
-7.  On Master node,  Run following command to check if worker node is added or not 
+## Add the worker
 
-   $ kubectl get nodes
-    sample output should look like below. 
-     NAME                        STATUS     ROLES           AGE     VERSION
-    k8smaster.ssktraining.com   NotReady   control-plane   9m28s   v1.27.3
-    k8sworker.ssktraining.com   NotReady    none           1m20s   v1.27.3
-    
-8. On Master Node, Install CNI provider "calico" for pod network 
+5. Log in to the worker node, clone this repo and run the worker script:
 
-    $ kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.25.0/manifests/calico.yaml
+       git clone https://github.com/cloud-dev-user/kubernetes_demo.git
+       cd kubernetes_demo/installation_scripts
+       ./pre_configure_k8s_worker.sh
 
-9. On Master Nodes, Verify now all pods are in "running" state which are required for kubernetes cluster and then node are in "Ready" Status 
+   Update `hostname.txt` first, same as on the control plane.
 
-     $ kubectl get pods -n kube-system 
-     $ kubectl get nodes 
+6. Join it to the cluster with the command `kubeadm init` printed in step 3:
 
-Congratulations, your kubernetes cluster is ready for use.
-NOTE: 
+       sudo kubeadm join k8smaster.ssktraining.com:6443 \
+         --token <token> \
+         --discovery-token-ca-cert-hash sha256:<hash>
 
-id you missed out command to register your working node to master while running kubeadm init... command , you can print that command using following 
+   Lost that line? On the control plane:
 
-$ `kubeadm token create --print-join-command`
+       kubeadm token create --print-join-command
+
+7. Back on the control plane:
+
+       kubectl get nodes
+
+   Both nodes appear, both `NotReady`. That is correct — there is no pod
+   network yet.
+
+       NAME                        STATUS     ROLES           AGE   VERSION
+       k8smaster.ssktraining.com   NotReady   control-plane   9m    v1.37.1
+       k8sworker.ssktraining.com   NotReady   <none>          1m    v1.37.1
+
+## Install the pod network
+
+8. Calico, via its operator (the method Tigera recommends for new clusters):
+
+       kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.32.2/manifests/tigera-operator.yaml
+       kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.32.2/manifests/custom-resources.yaml
+
+   The older single-manifest install still works if you prefer it:
+
+       kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.32.2/manifests/calico.yaml
+
+9. Verify:
+
+       kubectl get pods -A
+       kubectl get nodes
+
+   Both nodes go `Ready` once Calico is up.
+
+Your cluster is ready.
+
+## Verify it does what you think it does
+
+Two checks worth running before you trust it:
+
+    # NetworkPolicy is actually enforced (many CNIs accept the object and ignore it)
+    kubectl apply -f current_practice/13-network-policy.yaml
+
+    # Pod Security Admission is on
+    kubectl apply -f current_practice/01-namespace-pod-security.yaml
+
+The second one is meant to fail — see `current_practice/README.md`.
+
+---
+
+## What changed in this file, and when
+
+The previous version of these instructions targeted **v1.27**, which left
+support in 2024. More importantly, the install script pointed at
+`apt.kubernetes.io` and `packages.cloud.google.com`. Those repositories were
+frozen in September 2023 and switched off in March 2024, so the script
+failed at `apt update` for anyone who ran it after that date.
+
+The replacement is `pkgs.k8s.io`. Two things about it are worth knowing:
+
+- The repository URL contains the **minor version**. `apt upgrade` will never
+  move you from 1.36 to 1.37; you edit `/etc/apt/sources.list.d/kubernetes.list`
+  first. This is deliberate, and it is the part people get wrong.
+- Keys go in `/etc/apt/keyrings` with `signed-by=`, not `apt-key` or
+  `/etc/apt/trusted.gpg.d`. A key in `trusted.gpg.d` is trusted for *every*
+  repository on the machine.

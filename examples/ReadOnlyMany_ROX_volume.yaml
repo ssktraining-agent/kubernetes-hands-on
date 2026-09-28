@@ -1,0 +1,43 @@
+# ReadOnlyMany (ROX)
+#
+# Many nodes may mount the volume, all of them read-only. Useful for shared
+# static content or a reference dataset.
+#
+# Not every storage backend supports it — most block-device CSI drivers do
+# not. Check your StorageClass before designing around it:
+#
+#   kubectl get storageclass
+#   kubectl describe pv <name>   # look at Access Modes on the bound PV
+#
+# (This file was previously named "examplesReadOnlyMany _RWO_volume.yaml" —
+# outside the examples/ folder, with a space in the name, and labelled RWO
+# while declaring ROX. It also had two `spec:` keys, so kubectl rejected it.)
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-shared-pvc
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod-rox
+spec:
+  containers:
+    - name: my-container
+      image: nginx:1.30
+      volumeMounts:
+        - name: my-volume
+          mountPath: /usr/share/nginx/html
+          readOnly: true
+  volumes:
+    - name: my-volume
+      persistentVolumeClaim:
+        claimName: my-shared-pvc
+        readOnly: true

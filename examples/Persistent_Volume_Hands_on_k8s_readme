@@ -45,7 +45,7 @@ metadata:
 spec:
   containers:
   - name: my-container
-    image: nginx:latest
+    image: nginx:1.30
     volumeMounts:
     - name: my-volume
       mountPath: /mnt/pvs/my-pv

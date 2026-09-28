@@ -1,0 +1,60 @@
+# In-place pod resize — stable since v1.35
+#
+# Until this landed, changing a container's CPU or memory meant replacing the
+# pod. For a Deployment that is a rolling update and nobody notices. For a
+# stateful workload with a warm cache, a long-lived connection pool, or a
+# 40-minute JVM warmup, it is an outage you scheduled yourself.
+#
+# That constraint is why so many workloads are over-provisioned: the cost of
+# getting the number wrong was a restart, so everyone guessed high and left
+# it. Being able to raise memory on a live pod changes that calculation, and
+# it is why vertical autoscaling stops being a niche tool.
+#
+# resizePolicy declares, per resource, whether a change needs a restart.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: resizable
+  namespace: demo-secure
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: app
+      image: busybox:1.37
+      command: ["sh", "-c", "while true; do sleep 10; done"]
+
+      resizePolicy:
+        # CPU is a cgroup value the kernel changes live. No restart.
+        - resourceName: cpu
+          restartPolicy: NotRequired
+        # Memory can also be raised live, but many runtimes read their heap
+        # size once at startup, so a restart is often what you actually want.
+        # NotRequired is the alternative.
+        - resourceName: memory
+          restartPolicy: RestartContainer
+
+      resources:
+        requests: { cpu: 100m, memory: 64Mi }
+        limits:   { cpu: 200m, memory: 128Mi }
+
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
+
+# Resize it. Note the subresource — this is not an ordinary patch, and that
+# is what stops an unrelated `kubectl apply` from silently resizing pods:
+#
+#   kubectl -n demo-secure patch pod resizable --subresource resize \
+#     --patch '{"spec":{"containers":[{"name":"app","resources":{"requests":{"cpu":"300m"},"limits":{"cpu":"600m"}}}]}}'
+#
+# Then watch what did and did not restart:
+#
+#   kubectl -n demo-secure get pod resizable -o jsonpath='{.status.containerStatuses[0].restartCount}{"\n"}'
+#   kubectl -n demo-secure describe pod resizable | grep -A5 Conditions
+#
+# The pod keeps its name, its IP, its volumes and its uptime. Ask a room who
+# has ever restarted a database pod to give it more memory — most hands go
+# up, and that is the moment this lands.

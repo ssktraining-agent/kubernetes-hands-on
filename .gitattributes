@@ -1,0 +1,12 @@
+# Normalise line endings.
+#
+# This repo stores LF. Without this file, git on Windows with
+# core.autocrlf=true checks everything out as CRLF, and the next commit from
+# a Linux or macOS machine rewrites all 40 files — a diff that hides the real
+# change.
+* text=auto
+
+# Shell scripts must be LF whatever the platform. A CRLF shebang on Ubuntu
+# fails with "/usr/bin/env: 'bash\r': No such file or directory", which is
+# one of the harder errors to recognise the first time you see it.
+*.sh text eol=lf

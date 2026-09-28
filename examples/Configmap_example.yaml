@@ -1,9 +1,17 @@
+# ConfigMap
+#
+# Every value in `data` is a string. `database_port: 3306` is parsed as an
+# integer by the YAML parser and rejected by the API server, so it has to be
+# quoted. This is the single most common ConfigMap error.
+#
+# Note what is NOT here any more: the password. A ConfigMap is not a Secret —
+# it is stored in plain text and readable by anything with get access to the
+# namespace. See secret_example.yaml.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: database-config
 data:
-  database_host: localhost
-  database_port: 3306
-  database_user: root
-  database_password: password
+  database_host: "localhost"
+  database_port: "3306"
+  database_user: "app"

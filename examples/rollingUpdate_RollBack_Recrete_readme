@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
       - name: my-app
-        image: nginx:latest
+        image: nginx:1.28
 ```
 
 2. **Verify the deployment:** Use the `kubectl get deployment` command to verify that the deployment is running and that all of the pods are ready:
@@ -47,7 +47,7 @@ spec:
     spec:
       containers:
       - name: my-app
-        image: nginx:latest-alpine
+        image: nginx:1.30-alpine
 ```
 
 Then, apply the updated deployment spec to the Kubernetes cluster:
